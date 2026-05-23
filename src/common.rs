@@ -421,3 +421,224 @@ fn test_myers_unbalanced_regressions() {
         }));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property-based tests
+// ---------------------------------------------------------------------------
+//
+// These tests target `diff_slices` so that every shipped `Algorithm` and
+// every shipped `DiffHook` composition can be exercised against the same
+// invariants:
+//
+// 1. The captured `DiffOp`s tile both inputs: the first op starts at
+//    `(0, 0)`, every subsequent op begins exactly where the previous op
+//    ended, and the last op ends at `(old.len(), new.len())`.
+// 2. Every `DiffOp::Equal` names actually-equal slices of the two inputs.
+// 3. Applying the ops to `old` reconstructs `new` exactly.
+
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+    use crate::algorithms::{Algorithm, Capture, Compact, Replace, diff_slices};
+    use crate::DiffOp;
+
+    #[derive(Debug, Clone, Copy)]
+    enum HookPipeline {
+        Capture,
+        Replace,
+        Compact,
+        /// `Replace<Compact<Capture>>` -- the pipeline `TextDiff` uses.
+        CompactThenReplace,
+        /// `Compact<Replace<Capture>>` -- compaction over `Replace`'s output.
+        ReplaceThenCompact,
+    }
+
+    fn pipeline_strategy() -> impl Strategy<Value = HookPipeline> {
+        prop_oneof![
+            Just(HookPipeline::Capture),
+            Just(HookPipeline::Replace),
+            Just(HookPipeline::Compact),
+            Just(HookPipeline::CompactThenReplace),
+            Just(HookPipeline::ReplaceThenCompact),
+        ]
+    }
+
+    fn algorithm_strategy() -> impl Strategy<Value = Algorithm> {
+        prop_oneof![
+            Just(Algorithm::Myers),
+            Just(Algorithm::Patience),
+            Just(Algorithm::Lcs),
+            Just(Algorithm::Hunt),
+            Just(Algorithm::Histogram),
+        ]
+    }
+
+    fn run_pipeline<T>(alg: Algorithm, pipeline: HookPipeline, old: &[T], new: &[T]) -> Vec<DiffOp>
+    where
+        T: Eq + core::hash::Hash,
+    {
+        match pipeline {
+            HookPipeline::Capture => {
+                let mut hook = Capture::new();
+                diff_slices(alg, &mut hook, old, new).unwrap();
+                hook.into_ops()
+            }
+            HookPipeline::Replace => {
+                let mut hook = Replace::new(Capture::new());
+                diff_slices(alg, &mut hook, old, new).unwrap();
+                hook.into_inner().into_ops()
+            }
+            HookPipeline::Compact => {
+                let mut hook = Compact::new(Capture::new(), old, new);
+                diff_slices(alg, &mut hook, old, new).unwrap();
+                hook.into_inner().into_ops()
+            }
+            HookPipeline::CompactThenReplace => {
+                let mut hook = Replace::new(Compact::new(Capture::new(), old, new));
+                diff_slices(alg, &mut hook, old, new).unwrap();
+                hook.into_inner().into_inner().into_ops()
+            }
+            HookPipeline::ReplaceThenCompact => {
+                let mut hook = Compact::new(Replace::new(Capture::new()), old, new);
+                diff_slices(alg, &mut hook, old, new).unwrap();
+                hook.into_inner().into_inner().into_ops()
+            }
+        }
+    }
+
+    fn check_invariants<T: Eq + core::fmt::Debug>(
+        ops: &[DiffOp],
+        old: &[T],
+        new: &[T],
+    ) -> Result<(), String> {
+        if ops.is_empty() {
+            if old.is_empty() && new.is_empty() {
+                return Ok(());
+            }
+            return Err(format!(
+                "empty op sequence but inputs are non-empty: old.len={}, new.len={}",
+                old.len(),
+                new.len()
+            ));
+        }
+
+        let mut old_cursor = 0usize;
+        let mut new_cursor = 0usize;
+        let mut reconstructed: Vec<&T> = Vec::with_capacity(new.len());
+
+        for (idx, op) in ops.iter().enumerate() {
+            match *op {
+                DiffOp::Equal { old_index, new_index, len } => {
+                    if old_index != old_cursor || new_index != new_cursor {
+                        return Err(format!(
+                            "op {idx} {op:?}: expected to start at \
+                             (old={old_cursor}, new={new_cursor})"
+                        ));
+                    }
+                    if old_index + len > old.len() || new_index + len > new.len() {
+                        return Err(format!("op {idx} {op:?}: range out of bounds"));
+                    }
+                    for i in 0..len {
+                        if old[old_index + i] != new[new_index + i] {
+                            return Err(format!(
+                                "op {idx} {op:?}: Equal names unequal slices \
+                                 at offset {i}: {:?} vs {:?}",
+                                old[old_index + i], new[new_index + i]
+                            ));
+                        }
+                        reconstructed.push(&new[new_index + i]);
+                    }
+                    old_cursor += len;
+                    new_cursor += len;
+                }
+                DiffOp::Delete { old_index, old_len, new_index } => {
+                    if old_index != old_cursor || new_index != new_cursor {
+                        return Err(format!(
+                            "op {idx} {op:?}: expected to start at \
+                             (old={old_cursor}, new={new_cursor})"
+                        ));
+                    }
+                    if old_index + old_len > old.len() {
+                        return Err(format!("op {idx} {op:?}: old range out of bounds"));
+                    }
+                    old_cursor += old_len;
+                }
+                DiffOp::Insert { old_index, new_index, new_len } => {
+                    if old_index != old_cursor || new_index != new_cursor {
+                        return Err(format!(
+                            "op {idx} {op:?}: expected to start at \
+                             (old={old_cursor}, new={new_cursor})"
+                        ));
+                    }
+                    if new_index + new_len > new.len() {
+                        return Err(format!("op {idx} {op:?}: new range out of bounds"));
+                    }
+                    for v in &new[new_index..new_index + new_len] {
+                        reconstructed.push(v);
+                    }
+                    new_cursor += new_len;
+                }
+                DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                    if old_index != old_cursor || new_index != new_cursor {
+                        return Err(format!(
+                            "op {idx} {op:?}: expected to start at \
+                             (old={old_cursor}, new={new_cursor})"
+                        ));
+                    }
+                    if old_index + old_len > old.len() || new_index + new_len > new.len() {
+                        return Err(format!("op {idx} {op:?}: range out of bounds"));
+                    }
+                    for v in &new[new_index..new_index + new_len] {
+                        reconstructed.push(v);
+                    }
+                    old_cursor += old_len;
+                    new_cursor += new_len;
+                }
+            }
+        }
+
+        if old_cursor != old.len() || new_cursor != new.len() {
+            return Err(format!(
+                "ops do not cover full inputs: ended at (old={old_cursor}, \
+                 new={new_cursor}), expected ({}, {})",
+                old.len(),
+                new.len()
+            ));
+        }
+
+        let new_refs: Vec<&T> = new.iter().collect();
+        if reconstructed != new_refs {
+            return Err(format!(
+                "reconstruction mismatch: got {reconstructed:?}, expected {new_refs:?}"
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn small_seq() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(0u8..4, 0..12)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 10000,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn diff_slices_satisfies_contract(
+            alg in algorithm_strategy(),
+            pipeline in pipeline_strategy(),
+            old in small_seq(),
+            new in small_seq(),
+        ) {
+            let ops = run_pipeline(alg, pipeline, &old, &new);
+            if let Err(msg) = check_invariants(&ops, &old, &new) {
+                return Err(TestCaseError::fail(format!(
+                    "{alg:?} + {pipeline:?} on old={old:?} new={new:?}: {msg}\nops={ops:#?}"
+                )));
+            }
+        }
+    }
+}
