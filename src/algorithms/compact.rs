@@ -147,13 +147,12 @@ where
 }
 
 fn normalize_diff_op_cursors(ops: &mut [DiffOp]) {
+    // Diffs always tile both inputs from the origin, so seed the running
+    // cursors at (0, 0). Seeding from `ops.first()` would propagate stale
+    // indices that swaps in `shift_diff_ops_up`/`shift_diff_ops_down` may
+    // have left on the first op.
     let mut old_cursor = 0;
     let mut new_cursor = 0;
-
-    if let Some(op) = ops.first() {
-        old_cursor = op.old_range().start;
-        new_cursor = op.new_range().start;
-    }
 
     for op in ops.iter_mut() {
         match op {
@@ -288,6 +287,9 @@ where
             (DiffTag::Insert, DiffTag::Delete) | (DiffTag::Delete, DiffTag::Insert) => {
                 ops.swap(pointer - 1, pointer);
                 pointer -= 1;
+                // The swap leaves both ops with stale cursors; renormalize
+                // so the next iteration reads live ranges.
+                normalize_diff_op_cursors(ops);
             }
             // Merge the two ranges
             (DiffTag::Insert, DiffTag::Insert) => {
@@ -376,10 +378,14 @@ where
                     {
                         ops[pointer - 1].grow_right(prefix_len);
                     } else {
+                        // The new Equal goes BEFORE this Delete, at the
+                        // current running cursor -- which is this_op's start
+                        // in both old and new. `next_op.old_range().start` is
+                        // tempting but points past the Delete in old.
                         ops.insert(
                             pointer,
                             DiffOp::Equal {
-                                old_index: next_op.old_range().start,
+                                old_index: this_op.old_range().start,
                                 new_index: this_op.new_range().start,
                                 len: prefix_len,
                             },
@@ -403,6 +409,9 @@ where
             (DiffTag::Insert, DiffTag::Delete) | (DiffTag::Delete, DiffTag::Insert) => {
                 ops.swap(pointer, pointer + 1);
                 pointer += 1;
+                // The swap leaves both ops with stale cursors; renormalize
+                // so the next iteration reads live ranges.
+                normalize_diff_op_cursors(ops);
             }
             // Merge the two ranges
             (DiffTag::Insert, DiffTag::Insert) => {

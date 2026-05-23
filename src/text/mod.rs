@@ -1167,6 +1167,29 @@ fn test_regression_issue_37() {
     let mut output = diff.unified_diff();
     assert_eq!(
         output.context_radius(0).to_string(),
-        "@@ -1 +1,0 @@\n-\u{18}\n@@ -2,0 +2,2 @@\n+\n+\r"
+        "@@ -1 +0,0 @@\n-\u{18}\n@@ -2,0 +2,2 @@\n+\n+\r"
+    );
+}
+
+#[test]
+fn test_regression_issue_95() {
+    let diff = TextDiff::from_lines("d\na\nc\nb\na\na", "b\nd\nd\na\nd");
+    let changes = diff
+        .iter_all_changes()
+        .map(|c| (c.tag(), c.value().to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        changes,
+        vec![
+            (ChangeTag::Insert, "b\n".into()),
+            (ChangeTag::Insert, "d\n".into()),
+            (ChangeTag::Equal, "d\n".into()),
+            (ChangeTag::Equal, "a\n".into()),
+            (ChangeTag::Delete, "c\n".into()),
+            (ChangeTag::Delete, "b\n".into()),
+            (ChangeTag::Delete, "a\n".into()),
+            (ChangeTag::Delete, "a".into()),
+            (ChangeTag::Insert, "d".into()),
+        ],
     );
 }

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9c0a15e320394495f8519e8e9c9d5bacda44a60773531acf29d43e3320611b5e # shrinks to alg = Histogram, pipeline = Capture, old = [0, 0], new = [1]
+cc 4705ae637c1dc97fa57d93db90ba4e259f2877e20f7f06da69a5ac4070640af3 # shrinks to alg = Lcs, pipeline = Compact, old = [0, 3, 3, 1, 0], new = [0, 0, 3, 0]
